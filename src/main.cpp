@@ -5,6 +5,8 @@
 
 // drivers
 #include "DebounceIn.h"
+#include "IRSensor.h"
+
 
 bool do_execute_main_task = false; // this variable will be toggled via the user button (blue button) and
                                    // decides whether to execute the main task or not
@@ -15,6 +17,7 @@ bool do_reset_all_once = false;    // this variable is used to reset certain var
 DebounceIn user_button(BUTTON1);   // create DebounceIn to evaluate the user button
 void toggle_do_execute_main_fcn(); // custom function which is getting executed when user
                                    // button gets pressed, definition at the end
+float ir_sensor_compensation(float ir_distance_mV); // custom function to compensate the non-linear behavior of the infrared distance sensor, definition at the end
 
 // main runs as an own thread
 int main()
@@ -39,6 +42,16 @@ int main()
 
     // --- adding variables and objects and applying functions starts here ---
 
+    // ir distance sensor
+    float ir_distance_mV = 0.0f; // define a variable to store measurement (in mV)
+    float ir_distance_cm = 0.0f; // define a variable to store the compensated distance (in cm)
+    AnalogIn ir_analog_in(PC_2); // create AnalogIn object to read in the infrared distance sensor
+                             // 0...3.3V are mapped to 0...1
+    IRSensor ir_sensor(PC_2); // create IRSensor object to read in the infrared distance sensor and apply an average filter
+    ir_sensor.setCalibration(9947.4012f, -83.1907f); // set calibration parameters for the compensation function, you can get these values from the ir_sensor_eval.py file
+    float ir_distance_avg = 0.0f; // define a variable to store the compensated distance after applying the average filter (in cm)
+    //a = 9974.4012,  b = -83.1907
+
     // start timer
     main_task_timer.start();
 
@@ -48,9 +61,18 @@ int main()
 
         // --- code that runs every cycle at the start goes here ---
 
+        // print to the serial terminal
+        printf("IR distance mV: %f IR distance cm: %f IR distance avg: %f\n", ir_distance_mV, ir_distance_cm, ir_distance_avg);
+
         if (do_execute_main_task) {
 
             // --- code that runs when the blue button was pressed goes here ---
+
+            // read analog input
+            ir_distance_mV = 1.0e3f * ir_analog_in.read() * 3.3f;
+            ir_distance_cm = ir_sensor_compensation(ir_distance_mV);
+            ir_distance_avg = ir_sensor.read();
+            
 
             // visual feedback that the main task is executed, setting this once would actually be enough
             led1 = 1;
@@ -63,6 +85,8 @@ int main()
 
                 // reset variables and objects
                 led1 = 0;
+                ir_distance_mV = 0.0f;
+                ir_distance_cm = 0.0f;
             }
         }
 
@@ -78,6 +102,20 @@ int main()
         else
             thread_sleep_for(main_task_period_ms - main_task_elapsed_time_ms);
     }
+}
+
+float ir_sensor_compensation(float ir_distance_mV)
+{
+    // insert values that you got from the MATLAB file
+    static const float a = 9974.4012f;
+    static const float b = -83.1907f;
+    //a = 9974.4012,  b = -83.1907
+
+    // avoid division by zero by adding a small value to the denominator
+    if (ir_distance_mV + b == 0.0f)
+        ir_distance_mV -= 0.001f;
+
+    return a / (ir_distance_mV + b);
 }
 
 void toggle_do_execute_main_fcn()
