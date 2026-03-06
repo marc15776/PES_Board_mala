@@ -50,7 +50,7 @@ public:
      *
      * @param pin The pin name to which the servo is connected.
      */
-    explicit Servo(PinName pin);
+    explicit Servo(PinName pin, float pulse_min, float pulse_max);
 
     /**
      * @brief Destroy the Servo object.

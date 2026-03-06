@@ -6,6 +6,8 @@
 // drivers
 #include "DebounceIn.h"
 #include "IRSensor.h"
+#include "Servo.h"
+#include "UltrasonicSensor.h"
 
 
 bool do_execute_main_task = false; // this variable will be toggled via the user button (blue button) and
@@ -22,12 +24,20 @@ float ir_sensor_compensation(float ir_distance_mV); // custom function to compen
 // main runs as an own thread
 int main()
 {
+    // set up states for state machine
+    enum RobotState {
+        INITIAL,
+        EXECUTION,
+        SLEEP,
+        EMERGENCY
+    } robot_state = RobotState::INITIAL;
+
     // attach button fall function address to user button object
     user_button.fall(&toggle_do_execute_main_fcn);
 
     // while loop gets executed every main_task_period_ms milliseconds, this is a
     // simple approach to repeatedly execute main
-    const int main_task_period_ms = 20; // define main task period time in ms e.g. 20 ms, therefore
+    const int main_task_period_ms = 200; // define main task period time in ms e.g. 20 ms, therefore
                                         // the main task will run 50 times per second
     Timer main_task_timer;              // create Timer object which we use to run the main task
                                         // every main_task_period_ms
@@ -43,15 +53,40 @@ int main()
     // --- adding variables and objects and applying functions starts here ---
 
     // ir distance sensor
-    float ir_distance_mV = 0.0f; // define a variable to store measurement (in mV)
-    float ir_distance_cm = 0.0f; // define a variable to store the compensated distance (in cm)
-    AnalogIn ir_analog_in(PC_2); // create AnalogIn object to read in the infrared distance sensor
+    //float ir_distance_mV = 0.0f; // define a variable to store measurement (in mV)
+    //float ir_distance_cm = 0.0f; // define a variable to store the compensated distance (in cm)
+    //AnalogIn ir_analog_in(PC_2); // create AnalogIn object to read in the infrared distance sensor
                              // 0...3.3V are mapped to 0...1
+
     IRSensor ir_sensor(PC_2); // create IRSensor object to read in the infrared distance sensor and apply an average filter
     ir_sensor.setCalibration(9947.4012f, -83.1907f); // set calibration parameters for the compensation function, you can get these values from the ir_sensor_eval.py file
     float ir_distance_avg = 0.0f; // define a variable to store the compensated distance after applying the average filter (in cm)
     //a = 9974.4012,  b = -83.1907
 
+    // servo
+    // reely S0090
+    float servo_D0_ang_min = 0.0350f;
+    float servo_D0_ang_max = 0.1200f;
+
+
+    Servo servo_D0(PB_D0, servo_D0_ang_min, servo_D0_ang_max);
+    float servo_input = 0.0f;
+    int servo_counter = 0;    // define servo counter, this is an additional variable
+                              // used to command the servo
+    const int loops_per_seconds = static_cast<int>(ceilf(1.0f / (0.001f * static_cast<float>(main_task_period_ms))));
+
+    // mechanical button
+    DigitalIn mechanical_button(PC_5);  // create DigitalIn object to evaluate mechanical button, you
+                                        // need to specify the mode for proper usage, see below
+    mechanical_button.mode(PullUp);     // sets pullup between pin and 3.3 V, so that there
+                                        // is a defined potential
+
+    // ultrasonic sensor
+    UltrasonicSensor us_sensor(PB_D3);
+    float us_distance_cm = 0.0f;
+    float us_distance_min = 6.0f;   // min and max ultrasonic sensor reading, (us_distance_min, us_distance_max) -> (servo_min, servo_max)
+    float us_distance_max = 40.0f;
+        
     // start timer
     main_task_timer.start();
 
@@ -62,31 +97,112 @@ int main()
         // --- code that runs every cycle at the start goes here ---
 
         // print to the serial terminal
-        printf("IR distance mV: %f IR distance cm: %f IR distance avg: %f\n", ir_distance_mV, ir_distance_cm, ir_distance_avg);
+        //printf("IR distance mV: %f IR distance cm: %f IR distance avg: %f\n", ir_distance_mV, ir_distance_cm, ir_distance_avg);
+        printf("Pulse width: %f \n", servo_input);
+        printf("US distance cm: %f \n", us_distance_cm);
 
         if (do_execute_main_task) {
 
             // --- code that runs when the blue button was pressed goes here ---
 
+            // state machine
+            switch (robot_state) {
+                case RobotState::INITIAL: {
+                    printf("INITIAL\n");
+
+                    // enable the servo
+                    if (!servo_D0.isEnabled())
+                        servo_D0.enable();
+                    robot_state = RobotState::EXECUTION;
+
+                    break;
+                }
+                case RobotState::EXECUTION: {
+                    printf("EXECUTION\n");
+
+                    // function to map the distance to the servo movement (us_distance_min, us_distance_max) -> (0.0f, 1.0f)
+                    servo_input = (us_distance_cm - us_distance_min) / (us_distance_max - us_distance_min);
+                    // values smaller than 0.0f or bigger than 1.0f are constrained to the range (0.0f, 1.0f) in setPulseWidth
+                    servo_D0.setPulseWidth(servo_input);
+
+                    // if the measurement is outside the min or max limit go to SLEEP
+                    if ((us_distance_cm < us_distance_min) || (us_distance_cm > us_distance_max))
+                        robot_state = RobotState::SLEEP;
+
+                    // if the mechanical button is pressed go to EMERGENCY
+                    if (mechanical_button.read())
+                        robot_state = RobotState::EMERGENCY;
+
+                    break;
+                }
+                case RobotState::SLEEP: {
+                    printf("SLEEP\n");
+
+                    // if the measurement is within the min and max limits go to EXECUTION
+                    if ((us_distance_cm > us_distance_min) && (us_distance_cm < us_distance_max))
+                        robot_state = RobotState::EXECUTION;
+
+                    // if the mechanical button is pressed go to EMERGENCY
+                    if (mechanical_button.read())
+                        robot_state = RobotState::EMERGENCY;
+
+                    break;
+                }
+                case RobotState::EMERGENCY: {
+                    printf("EMERGENCY\n");
+
+                    // the transition to the emergency state causes the execution of the commands contained
+                    // in the outer else statement scope, and since do_reset_all_once is true the system undergoes a reset
+                    toggle_do_execute_main_fcn();
+
+                    break;
+                }
+                default: {
+
+                    break; // do nothing
+                }
+            }
             // read analog input
-            ir_distance_mV = 1.0e3f * ir_analog_in.read() * 3.3f;
-            ir_distance_cm = ir_sensor_compensation(ir_distance_mV);
-            ir_distance_avg = ir_sensor.read();
+            //ir_distance_mV = 1.0e3f * ir_analog_in.read() * 3.3f;
+            //ir_distance_cm = ir_sensor_compensation(ir_distance_mV);
+            //ir_distance_avg = ir_sensor.read();
+
+            // command the servos
+            servo_D0.setPulseWidth(servo_input);
+
+            // calculate inputs for the servos for the next cycle
+            if ((servo_input < 1.0f) &&                     // constrain servo_input to be < 1.0f
+                (servo_counter % loops_per_seconds == 0) && // true if servo_counter is a multiple of loops_per_second
+                (servo_counter != 0)){                       // avoid that servo_input gets increased in the first cycle when servo_counter is 0
+                servo_input += 0.005f;
+            }
+            servo_counter++;
+
+            // read us sensor distance, only valid measurements will update us_distance_cm
+            const float us_distance_cm_candidate = us_sensor.read();
+            if (us_distance_cm_candidate > 0.0f)
+                us_distance_cm = us_distance_cm_candidate;
             
 
             // visual feedback that the main task is executed, setting this once would actually be enough
             led1 = 1;
         } else {
             // the following code block gets executed only once
-            if (do_reset_all_once) {
+            if (do_reset_all_once) 
+            {
                 do_reset_all_once = false;
 
                 // --- variables and objects that should be reset go here ---
 
                 // reset variables and objects
                 led1 = 0;
-                ir_distance_mV = 0.0f;
-                ir_distance_cm = 0.0f;
+                //ir_distance_mV = 0.0f;
+                //ir_distance_cm = 0.0f;
+                servo_D0.disable();
+                servo_input = 0.0f;
+                us_distance_cm = 0.0f;
+                robot_state = RobotState::INITIAL;
+
             }
         }
 
